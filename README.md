@@ -37,7 +37,7 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 
 ## 📡 API Integration
 
-This project uses the **Trello API** to monitor project changes and provide visual feedback via the RGB LED. (**Pending**)
+This project uses the **[Trello API](https://developer.atlassian.com/cloud/trello/guides/rest-api/api-introduction/)** to monitor project changes and provide visual feedback via the RGB LED.
 
 
 ## 💻 Development Environment
@@ -46,9 +46,47 @@ This project uses the **Trello API** to monitor project changes and provide visu
 - **Secondary IDE**: VS Code (for documentation and API testing)
 - **Platform**: Raspberry Pi Pico W 
 
-## Getting Started
+## ⭐ Getting Started
 
+### Hardware Setup (Arduino)
 1. Install the Raspberry Pi Pico W board support in Arduino IDE.
 2. Open the sketch in `src/`.
-3. Configure your Wi-Fi credentials.
+3. Configure your Wi-Fi credentials in `secrets.h`.
 4. Upload the sketch to the Pico W.
+
+### API Testing Setup (Python)
+If need to test the Trello API using the provided Python scripts in `tests/`:
+
+1. Install the required dependencies:
+   ```bash
+   pip install python-dotenv requests
+   ```
+2. Create a `.env` file in the root directory and add Trello API credentials:
+   ```env
+   TRELLO_API_KEY=your_api_key_here
+   TRELLO_TOKEN=your_oauth_token_here
+   TRELLO_BOARD_ID=your_board_id_here
+   ```
+3. Run the test script: 
+   ```bash
+   python tests/trello_api_test.py
+   ```
+
+   **💡 Note:** In line 29 of `trello_api_test.py` (`selected_list = trello_lists[0]`), is possible to configure the specific list to track by changing the index (0 represents the first list).
+
+   **Example Output of Testing Script:**
+   ```text
+   ---> Simulating potentiometer input: Currently tracking list 'To Do'
+   
+   There are 1 cards in this list. Starting pressure value calculation...
+   
+      Card: Test 1
+       Status: No due date -> Pressure +1
+   
+   ========================================
+   Total pressure score for the current list: 1
+   Pico W Pin PWM Output Instructions:
+      -> 🔴 GP13 (Red):   5
+      -> 🟢 GP14 (Green): 249
+      -> 🔵 GP15 (Blue):  0
+   ```
