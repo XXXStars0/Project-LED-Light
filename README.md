@@ -11,6 +11,7 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 
 - `docs/`: Design documents and technical notes.
 - `RGB_LED/`: Arduino/C++ source code for the Pico W.
+- `Processing_Connect/`: Alt wired internet connection mode using Processing.
 - `tests/`: API verification and testing scripts (Python/JS).
 
 ## ⚙️ Hardware Components
@@ -31,7 +32,7 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 | ----------------- | ---------------------------- | -------------- |
 | **RGB LED**       | GP13 (R), GP14 (G), GP15 (B) | PWM Support    |
 | **Potentiometer** | GP26                         | Analog Input   |
-| **Ultrasonic**    | GP28 / Pin 34                |                |
+| **Ultrasonic**    | GP28                         |                |
 | **Button**        | GP16                         | 100KΩ Resistor |
 | **LDR**           | GP27                         |                |
 
@@ -90,3 +91,23 @@ If need to test the Trello API using the provided Python scripts in `tests/`:
       -> 🟢 GP14 (Green): 249
       -> 🔵 GP15 (Blue):  0
    ```
+
+### Wired Connection Setup (Processing)
+An alternative wired mode is available using Processing to fetch the Trello API and communicate with the Pico W directly via Serial (USB). This allows the computer to handle API requests instead of the Pico W's Wi-Fi.
+
+1. Open `RGB_LED/wifi_config.h` and comment out the line: `// #define USE_WIFI_MODE`.
+2. Upload the `RGB_LED.ino` sketch to the Pico W using Arduino IDE.
+3. Keep the Pico W connected to your computer via USB.
+4. Open the `Processing_Connect/Processing_Connect.pde` sketch in the [Processing IDE](https://processing.org/).
+5. Check your Arduino IDE to see which COM port the Pico W is using, and update the `COM_PORT` variable in the Processing sketch accordingly (e.g., `"COM4"`).
+6. Run the script in Processing. It will automatically read your API credentials from the root `.env` file, read potentiometer data sent from the Pico W, and send back realtime RGB color values!
+
+## 🛠️ Troubleshooting & Fixes
+
+- **Pico W not reading Potentiometer data:**
+  - *Issue:* The board and wiring appeared correct, but no potentiometer readings were being registered.
+  - *Fix:* Discovered that the potentiometer was accidentally connected to the `RUN` (reset) pin instead of the designated `GP26` analog input pin. Reconnecting it to `GP26` resolved the issue.
+
+- **Pico W Board Overheating:**
+  - *Issue:* The RGB LED caused a short circuit, resulting in the Pico W board overheating rapidly when powered on.
+  - *Fix:* Added **220Ω resistors** to the RGB LED circuits to limit the current, effectively preventing the short circuit and heat issues.

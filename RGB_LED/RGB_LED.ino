@@ -1,50 +1,58 @@
 //------------------------
 // Assignment: RGB LED
 //------------------------
-// Basic Function and API Test Version
-// Header
 
-#include "keys.h" // Wifi Passwords and Trello API keys
+// Mode switch: edit wifi_config.h
+#include "wifi_config.h"
+
+// Pin Setup - Output
+const int PIN_LED_R = 13;
+const int PIN_LED_G = 14;
+const int PIN_LED_B = 15;
+
+// Pin Setup - Input
+const int PIN_POT = 26;
+const int PIN_BUTTON = 16;
+const int PIN_LDR = 27;
+const int PIN_IR = 28;
+
+// Serial1 baud must match Processing sketch
+const int SERIAL1_BAUD = 9600;
+
+// WiFi-mode-only includes and globals
+#ifdef USE_WIFI_MODE
+#include "keys.h"
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <time.h>
 
-// Pin Setup
-const int PIN_LED_R = 13;
-const int PIN_LED_G = 14;
-const int PIN_LED_B = 15;
-const int PIN_POT = 26;
-
 const float MAX_PRESSURE_THRESHOLD = 50.0;
-
-// Maximum number of lists we can store
 const int MAX_LISTS = 10;
 String listIDs[MAX_LISTS];
 String listNames[MAX_LISTS];
 int listCount = 0;
+#endif
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200); // USB debug port
 
   pinMode(PIN_LED_R, OUTPUT);
   pinMode(PIN_LED_G, OUTPUT);
   pinMode(PIN_LED_B, OUTPUT);
   pinMode(PIN_POT, INPUT);
-
-  // Set RP2040 analog read resolution (0-4095)
   analogReadResolution(12);
 
-  // 1. Connect to WiFi
+#ifdef USE_WIFI_MODE
+  // WiFi Mode: connect to network, sync time, pre-fetch lists
   Serial.print("Connecting to WiFi");
   WiFi.begin(SECRET_SSID, SECRET_PASS);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\n✅ WiFi Connected!");
+  Serial.println("\nWiFi Connected!");
 
-  // 2. Synchronize Time using NTP (Needed for Due Date calculation)
   Serial.print("Syncing Time");
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   time_t now = time(nullptr);
@@ -53,71 +61,111 @@ void setup() {
     Serial.print(".");
     now = time(nullptr);
   }
-  Serial.println("\n✅ Time synchronized!");
-
-  // 3. Fetch Trello Lists once at startup
+  Serial.println("\nTime synchronized!");
   fetchTrelloLists();
+
+#else
+  // USB Mode: Serial (USB CDC) is shared with Processing.
+  // Re-init at the baud rate Processing uses.
+  Serial.begin(SERIAL1_BAUD);
+  // Note: no debug print here — would collide with incoming data from
+  // Processing
+#endif
 }
 
 void loop() {
+#ifdef USE_WIFI_MODE
+  // ===== WiFi Mode Loop =====
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ WiFi disconnected!");
+    Serial.println("WiFi disconnected!");
     delay(5000);
     return;
   }
-
   if (listCount == 0) {
-    Serial.println("❌ No lists found or API failed.");
+    Serial.println("No lists found or API failed.");
     delay(5000);
     return;
   }
 
-  // 4. Reading Potentiometer and mapping
   int potValue = analogRead(PIN_POT);
-  // Map analog value (0-4095) to list index (0 to listCount-1)
   int selectedIndex = map(potValue, 0, 4096, 0, listCount);
   selectedIndex = constrain(selectedIndex, 0, listCount - 1);
 
   Serial.println("\n========================================");
-  Serial.print(
-      "---> 🎛️ Simulating potentiometer input: Currently tracking list '");
+  Serial.print("---> Tracking list: '");
   Serial.print(listNames[selectedIndex]);
   Serial.println("'");
 
-  // 5. Calculate pressure
   int totalPressure = calculateListPressure(listIDs[selectedIndex]);
-
-  Serial.print("🔥 Total pressure score: ");
+  Serial.print("Total pressure: ");
   Serial.println(totalPressure);
 
-  // 6. Map to RGB
-  float pressureRatio = (float)totalPressure / MAX_PRESSURE_THRESHOLD;
-  if (pressureRatio > 1.0)
-    pressureRatio = 1.0;
+  // Color mapping: Blue(idle) → Green(low) → Yellow(mid) → Red(high)
+  int r, g, b;
+  if (totalPressure == 0) {
+    // No tasks / empty list → Blue
+    r = 0;
+    g = 0;
+    b = 255;
+  } else {
+    float ratio = (float)totalPressure / MAX_PRESSURE_THRESHOLD;
+    if (ratio > 1.0)
+      ratio = 1.0;
+    if (ratio <= 0.5) {
+      // Green → Yellow: R ramps up, G stays at 255
+      float t = ratio / 0.5;
+      r = (int)(255 * t);
+      g = 255;
+    } else {
+      // Yellow → Red: R stays at 255, G ramps down
+      float t = (ratio - 0.5) / 0.5;
+      r = 255;
+      g = (int)(255 * (1.0 - t));
+    }
+    b = 0;
+  }
+  analogWrite(PIN_LED_R, r);
+  analogWrite(PIN_LED_G, g);
+  analogWrite(PIN_LED_B, b);
 
-  int red_pwm = 255 * pressureRatio;
-  int green_pwm = 255 * (1.0 - pressureRatio);
-  int blue_pwm = 0; // Default is not to mix blue
-
-  analogWrite(PIN_LED_R, red_pwm);
-  analogWrite(PIN_LED_G, green_pwm);
-  analogWrite(PIN_LED_B, blue_pwm);
-
-  Serial.println("🎨 Pico W Pin PWM Output Instructions:");
-  Serial.print("   -> 🔴 GP13 (Red):   ");
-  Serial.println(red_pwm);
-  Serial.print("   -> 🟢 GP14 (Green): ");
-  Serial.println(green_pwm);
-  Serial.print("   -> 🔵 GP15 (Blue):  ");
-  Serial.println(blue_pwm);
-
-  // Delay before next check (Trello API limits rate, don't ping too fast!)
   delay(10000);
+
+#else
+  // ===== USB Mode Loop =====
+
+  // 1. Report potentiometer value to Processing every 200ms ("POT:xxxx\n")
+  static unsigned long lastPotSend = 0;
+  if (millis() - lastPotSend >= 200) {
+    lastPotSend = millis();
+    int potValue = analogRead(PIN_POT);
+    Serial.print("POT:");
+    Serial.println(potValue);
+  }
+
+  // 2. Receive R,G,B commands from Processing
+  if (Serial.available()) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    // Only parse lines matching "R,G,B" format (ignore POT echo or empty lines)
+    int c1 = line.indexOf(',');
+    int c2 = line.lastIndexOf(',');
+    if (c1 > 0 && c2 > c1) {
+      int r = line.substring(0, c1).toInt();
+      int g = line.substring(c1 + 1, c2).toInt();
+      int b = line.substring(c2 + 1).toInt();
+
+      analogWrite(PIN_LED_R, r);
+      analogWrite(PIN_LED_G, g);
+      analogWrite(PIN_LED_B, b);
+    }
+  }
+#endif
 }
 
 // ---------------------------------------------------------
-// Helper Functions
+// WiFi Mode Helper Functions
 // ---------------------------------------------------------
+#ifdef USE_WIFI_MODE
 
 void fetchTrelloLists() {
   HTTPClient http;
@@ -250,3 +298,4 @@ time_t parseISO8601(const char *dateStr) {
   // Default timezone mktime conversion
   return mktime(&t);
 }
+#endif // USE_WIFI_MODE
