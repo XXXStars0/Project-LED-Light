@@ -1,0 +1,38 @@
+# Windows image help files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Windows Thumbnail cache
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# Arduino IDE
+build/
+libraries/
+*.bak
+*.hex
+*.bin
+*.elf
+*.zip
+
+# VS Code
+.vscode/
+*.log
+
+# Python (if used for testing)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+
+# Node.js (if used for testing)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
