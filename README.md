@@ -10,7 +10,7 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 ## 📁 Project Structure
 
 - `docs/`: Design documents and technical notes.
-- `src/`: Arduino/C++ source code for the Pico W.
+- `RGB_LED/`: Arduino/C++ source code for the Pico W.
 - `tests/`: API verification and testing scripts (Python/JS).
 
 ## ⚙️ Hardware Components
