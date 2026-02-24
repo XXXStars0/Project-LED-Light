@@ -25,6 +25,8 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 
 ## 💡 Pin Mapping Reference
 
+![Circuit Diagram (Unverified)](docs/img_circuit_1.jpeg)
+
 | Component         | Pico W Pin                   | Note           |
 | ----------------- | ---------------------------- | -------------- |
 | **RGB LED**       | GP13 (R), GP14 (G), GP15 (B) | PWM Support    |
