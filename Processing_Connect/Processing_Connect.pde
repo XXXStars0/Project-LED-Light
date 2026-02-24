@@ -26,6 +26,7 @@ final int STATE_BOOTING = 0;
 final int STATE_LOADING = 1;
 final int STATE_ERROR   = 2;
 final int STATE_TRACKING= 3;
+final int STATE_SLEEP   = 4;
 
 // Runtime State
 Serial serialPort;
@@ -39,7 +40,8 @@ int    currentState = STATE_BOOTING;
 int    targetRed = 0;
 int    targetGreen = 0;
 int    targetBlue = 0;
-boolean isFetching = false;       
+boolean isFetching = false;
+boolean forceRefresh = false;
 
 // ----------------------------------------
 void setup() {
@@ -87,12 +89,21 @@ void draw() {
   boolean listChanged = (currentSelectedIndex != lastSelectedIndex) && (cachedListCount > 0);
 
   // 2. Trigger Background Thread
-  if ((listChanged || timeToUpdate) && !isFetching) {
+  if (currentState == STATE_SLEEP) {
+    // Wake on pot movement
+    if (listChanged) {
+      setState(STATE_BOOTING);
+      forceRefresh = true;
+      println("POT: Wake");
+    }
+  }
+
+  if (currentState != STATE_SLEEP && (listChanged || timeToUpdate || forceRefresh) && !isFetching) {
+    forceRefresh = false;
     lastSelectedIndex = currentSelectedIndex;
     lastApiRequestTime = ms;
 
     setState(STATE_LOADING);
-    
     thread("fetchTrelloDataBackground"); 
   }
 
@@ -120,6 +131,11 @@ void draw() {
     case STATE_TRACKING:
       background(targetRed, targetGreen, targetBlue);
       drawText("TRACKING | List [" + lastSelectedIndex + "]\nPot: " + latestPotValue + " / 4095\nR:" + targetRed + " G:" + targetGreen + " B:" + targetBlue);
+      break;
+
+    case STATE_SLEEP:
+      background(10);
+      drawText("SLEEP (Press button to wake)");
       break;
   }
 }
@@ -149,6 +165,22 @@ void serialEvent(Serial port) {
     try {
       latestPotValue = Integer.parseInt(line.substring(4));
     } catch (Exception e) {}
+  } else if (line.equals("BTN:SHORT")) {
+    if (currentState == STATE_SLEEP) {
+      setState(STATE_BOOTING);
+      println("BTN: Wake");
+    }
+    forceRefresh = true;
+    println("BTN: Refresh");
+  } else if (line.equals("BTN:LONG")) {
+    if (currentState == STATE_SLEEP) {
+      setState(STATE_BOOTING);
+      forceRefresh = true;
+      println("BTN: Wake");
+    } else {
+      setState(STATE_SLEEP);
+      println("BTN: Sleep");
+    }
   }
 }
 
@@ -156,7 +188,6 @@ void serialEvent(Serial port) {
 // Fetch Trello -> Calculate pressure -> Send to Pico W (Runs on separate thread)
 void fetchTrelloDataBackground() {
   isFetching = true; // Lock
-  println("\n========================================");
 
   // 1. Get all lists on the board
   String listsJson = httpGet("https://api.trello.com/1/boards/" + BOARD_ID + "/lists?key=" + API_KEY + "&token=" + TOKEN);
@@ -196,7 +227,6 @@ void fetchTrelloDataBackground() {
   }
 
   JSONArray cards = parseJSONArray(cardsJson);
-  println("There are " + cards.size() + " cards in this list.");
 
   // 3. Pressure Analysis
   int totalPressure = 0;
@@ -218,8 +248,6 @@ void fetchTrelloDataBackground() {
     }
   }
 
-  println("Total pressure score: " + totalPressure);
-
   // 4. Color mapping: Blue(idle) → Green(low) → Yellow(mid) → Red(high)
   if (totalPressure == 0) {
     targetRed = 0; targetGreen = 0; targetBlue = 255;
@@ -237,14 +265,9 @@ void fetchTrelloDataBackground() {
     targetBlue = 0;
   }
 
-  println("PWM -> R:" + targetRed + " G:" + targetGreen + " B:" + targetBlue);
-
-  // 5. Send to Pico W via Serial (format: "RGB:r,g,b\n")
-  // The RGB string implicitly tells Pico to enter TRACKING state, but we also set local tracking
   setState(STATE_TRACKING);
   if (serialPort != null) {
     serialPort.write("RGB:" + targetRed + "," + targetGreen + "," + targetBlue + "\n");
-    println("Sent RGB to Pico W.");
   }
   
   isFetching = false; // Unlock

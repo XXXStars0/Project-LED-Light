@@ -13,25 +13,34 @@ const int PIN_LED_B = 15;
 // Pin Setup - Input
 const int PIN_POT = 26;
 const int PIN_BUTTON = 16;
-const int PIN_LDR = 27;
-const int PIN_IR = 28;
+// const int PIN_LDR = 27;
+// const int PIN_IR = 28;
 
 // Serial1 baud must match Processing sketch
 const int SERIAL1_BAUD = 9600;
 
-// --- State Machine Definitions ---
+// --- State Machine ---
 enum SystemState {
   STATE_BOOTING = 0,
   STATE_LOADING = 1,
   STATE_ERROR = 2,
-  STATE_TRACKING = 3
+  STATE_TRACKING = 3,
+  STATE_SLEEP = 4
 };
 
-// Volatile variables shared between Core 0 and Core 1
 volatile SystemState currentState = STATE_BOOTING;
 volatile int targetR = 0;
 volatile int targetG = 0;
 volatile int targetB = 0;
+
+// --- Button ---
+const unsigned long DEBOUNCE_DELAY = 30;
+const unsigned long LONG_PRESS_MS = 300;
+int lastButtonReading = LOW;
+int buttonStateStable = LOW;
+bool isPressed = false;
+unsigned long lastDebounceTime = 0;
+unsigned long pressStartTime = 0;
 
 // WiFi-mode-only includes and globals
 #ifdef USE_WIFI_MODE
@@ -87,13 +96,18 @@ void loop1() {
     break;
 
   case STATE_TRACKING:
-    // Solid tracking color
     analogWrite(PIN_LED_R, targetR);
     analogWrite(PIN_LED_G, targetG);
     analogWrite(PIN_LED_B, targetB);
     break;
+
+  case STATE_SLEEP:
+    digitalWrite(PIN_LED_R, LOW);
+    digitalWrite(PIN_LED_G, LOW);
+    digitalWrite(PIN_LED_B, LOW);
+    break;
   }
-  delay(10); // Prevent hard looping
+  delay(10);
 }
 
 // ---------------------------------------------------------
@@ -108,8 +122,6 @@ void setup() {
   pinMode(PIN_LED_B, OUTPUT);
   pinMode(PIN_POT, INPUT);
   pinMode(PIN_BUTTON, INPUT);
-  pinMode(PIN_LDR, INPUT);
-  pinMode(PIN_IR, INPUT);
   analogReadResolution(12);
 
   currentState = STATE_BOOTING;
@@ -171,11 +183,68 @@ void loop() {
     return;
   }
 
-  // Edge Detection State
   static int lastSelectedIndex = -1;
   static unsigned long lastApiRequestTime = 0;
-  const unsigned long apiRequestInterval = 10000; // 10s default
+  const unsigned long apiRequestInterval = 10000;
 
+  // --- Button Logic ---
+  static bool forceRefresh = false;
+  unsigned long currentTime = millis();
+  int btnReading = digitalRead(PIN_BUTTON);
+
+  if (btnReading != lastButtonReading)
+    lastDebounceTime = currentTime;
+
+  if ((currentTime - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (btnReading != buttonStateStable) {
+      buttonStateStable = btnReading;
+      if (buttonStateStable == HIGH && !isPressed) {
+        isPressed = true;
+        pressStartTime = currentTime;
+      }
+      if (buttonStateStable == LOW && isPressed) {
+        isPressed = false;
+        unsigned long duration = currentTime - pressStartTime;
+        if (duration < LONG_PRESS_MS) {
+          // Short press
+          if (currentState == STATE_SLEEP) {
+            currentState = STATE_BOOTING;
+            Serial.println("BTN: Wake");
+          }
+          forceRefresh = true;
+          Serial.println("BTN: Refresh");
+        } else {
+          // Long press
+          if (currentState == STATE_SLEEP) {
+            currentState = STATE_BOOTING;
+            forceRefresh = true;
+            Serial.println("BTN: Wake");
+          } else {
+            currentState = STATE_SLEEP;
+            Serial.println("BTN: Sleep");
+          }
+        }
+      }
+    }
+  }
+  lastButtonReading = btnReading;
+
+  if (currentState == STATE_SLEEP) {
+    // Wake on pot movement
+    int potNow = analogRead(PIN_POT);
+    int idxNow = map(potNow, 0, 4096, 0, listCount);
+    idxNow = constrain(idxNow, 0, listCount - 1);
+    if (idxNow != lastSelectedIndex) {
+      currentState = STATE_BOOTING;
+      forceRefresh = true;
+      Serial.println("POT: Wake");
+    } else {
+      delay(50);
+      return;
+    }
+  }
+
+  // --- Edge Detection ---
   int potValue = analogRead(PIN_POT);
   int currentSelectedIndex = map(potValue, 0, 4096, 0, listCount);
   currentSelectedIndex = constrain(currentSelectedIndex, 0, listCount - 1);
@@ -183,9 +252,9 @@ void loop() {
   bool timeToUpdate = (millis() - lastApiRequestTime >= apiRequestInterval);
   bool listChanged = (currentSelectedIndex != lastSelectedIndex);
 
-  // Trigger API update if list index changed or timer expired
-  if (listChanged || timeToUpdate) {
-    currentState = STATE_LOADING; // Trigger rainbow animation
+  if (listChanged || timeToUpdate || forceRefresh) {
+    forceRefresh = false;
+    currentState = STATE_LOADING;
 
     Serial.println("\n========================================");
     Serial.print("---> Tracking list: '");
@@ -227,17 +296,50 @@ void loop() {
     lastSelectedIndex = currentSelectedIndex;
     lastApiRequestTime = millis();
 
-    // Let animation catch up, then track
     delay(200);
     currentState = STATE_TRACKING;
   }
 
-  delay(50); // Small loop delay
+  delay(50);
 
 #else
   // ===== USB Mode Loop =====
 
-  // 1. Report potentiometer value to Processing every 200ms ("POT:xxxx\n")
+  // --- Button Logic (USB) ---
+  unsigned long currentTimeUsb = millis();
+  int btnReadingUsb = digitalRead(PIN_BUTTON);
+
+  if (btnReadingUsb != lastButtonReading)
+    lastDebounceTime = currentTimeUsb;
+
+  if ((currentTimeUsb - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (btnReadingUsb != buttonStateStable) {
+      buttonStateStable = btnReadingUsb;
+      if (buttonStateStable == HIGH && !isPressed) {
+        isPressed = true;
+        pressStartTime = currentTimeUsb;
+      }
+      if (buttonStateStable == LOW && isPressed) {
+        isPressed = false;
+        unsigned long duration = currentTimeUsb - pressStartTime;
+        if (duration < LONG_PRESS_MS) {
+          if (currentState == STATE_SLEEP) {
+            currentState = STATE_BOOTING;
+          }
+          Serial.println("BTN:SHORT");
+        } else {
+          if (currentState == STATE_SLEEP) {
+            currentState = STATE_BOOTING;
+          } else {
+            currentState = STATE_SLEEP;
+          }
+          Serial.println("BTN:LONG");
+        }
+      }
+    }
+  }
+  lastButtonReading = btnReadingUsb;
+
   static unsigned long lastPotSend = 0;
   if (millis() - lastPotSend >= 200) {
     lastPotSend = millis();
@@ -253,7 +355,7 @@ void loop() {
 
     if (line.startsWith("STATE:")) {
       int s = line.substring(6).toInt();
-      if (s >= 0 && s <= 3) {
+      if (s >= 0 && s <= 4) {
         currentState = (SystemState)s;
       }
     } else if (line.startsWith("RGB:")) {
@@ -311,14 +413,14 @@ void fetchTrelloLists() {
         Serial.println(listNames[listCount]);
         listCount++;
       }
-      Serial.print("✅ Found ");
+      Serial.print("  Found ");
       Serial.print(listCount);
       Serial.println(" lists.");
     } else {
-      Serial.println("❌ JSON Parsing failed!");
+      Serial.println("Error: JSON Parsing failed!");
     }
   } else {
-    Serial.print("❌ Request failed, code: ");
+    Serial.print("Error: Request failed, code: ");
     Serial.println(httpCode);
   }
   http.end();
@@ -347,10 +449,6 @@ int calculateListPressure(String listId) {
       time_t currentTime = time(nullptr);
 
       for (JsonObject card : cards) {
-        String cardName = card["name"].as<String>();
-        Serial.print("   Card: ");
-        Serial.println(cardName);
-
         if (!card["due"].isNull()) {
           String dueStr = card["due"].as<String>();
           time_t dueDate = parseISO8601(dueStr.c_str());
@@ -358,34 +456,23 @@ int calculateListPressure(String listId) {
           double hoursLeft = difftime(dueDate, currentTime) / 3600.0;
 
           if (hoursLeft < 0) {
-            Serial.print("    Status: Overdue! (");
-            Serial.print(-hoursLeft);
-            Serial.println(" h) -> +20");
             pressure += 20;
           } else if (hoursLeft <= 24.0) {
-            Serial.print("    Status: Due within 24h! (");
-            Serial.print(hoursLeft);
-            Serial.println(" h) -> +10");
             pressure += 10;
           } else if (hoursLeft <= 24.0 * 7.0) {
-            Serial.print("    Status: Due within 7 days. (");
-            Serial.print(hoursLeft / 24.0);
-            Serial.println(" d) -> +5");
             pressure += 5;
           } else {
-            Serial.println("    Status: Due in more than 7 days. -> +2");
             pressure += 2;
           }
         } else {
-          Serial.println("    Status: No due date -> +1");
           pressure += 1;
         }
       }
     } else {
-      Serial.println("❌ JSON Parsing failed for cards!");
+      Serial.println("Error: JSON Parsing failed for cards!");
     }
   } else {
-    Serial.println("❌ Failed to fetch cards.");
+    Serial.println("Error: Failed to fetch cards.");
   }
 
   http.end();
