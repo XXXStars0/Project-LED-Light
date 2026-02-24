@@ -35,12 +35,14 @@ Due to project time constraints and to ensure code stability, two initially plan
 ## 💡 Pin Mapping Reference
 
 ![Final Circuit Diagram (Simplified)](docs/img_circuit_3.jpeg)
+> This design remains unchanged, Potentiometer is still on GP 26. 
+
 *Current Implementation*
 
 | Component         | Pico W Pin                   | Note           |
 | ----------------- | ---------------------------- | -------------- |
 | **RGB LED**       | GP13 (R), GP14 (G), GP15 (B) | PWM Support    |
-| **Potentiometer** | GP26                         | Analog Input   |
+| **Potentiometer** | GP26 / GP27                  | Analog Input   |
 | **Button**        | GP16                         | Pull-down Res. |
 
 ### Previous Design Iterations
@@ -158,3 +160,7 @@ The Pico W uses dual-core architecture for non-blocking LED animations (Core 1) 
 - **Pico W Board Overheating:**
   - *Issue:* The RGB LED caused a short circuit, resulting in rapid overheating of the Pico W board.
   - *Fix:* Added **220Ω resistors** to the RGB LED circuits to limit current draw, successfully preventing short circuits and excessive heat.
+
+- **USB Disconnect at Low Potentiometer Values (GP26):**
+  - *Issue:* When the potentiometer was connected to `GP26` and rotated to near-minimum values, the USB Serial connection between the Pico W and the computer would drop unexpectedly.
+  - *Fix:* Relocated the potentiometer signal wire from `GP26` to `GP27`. The exact root cause on `GP26` remains unclear, but the issue has not reoccurred on `GP27`.

@@ -11,7 +11,7 @@ const int PIN_LED_G = 14;
 const int PIN_LED_B = 15;
 
 // Pin Setup - Input
-const int PIN_POT = 26;
+const int PIN_POT = 27;
 const int PIN_BUTTON = 16;
 // const int PIN_LDR = 27;
 // const int PIN_IR = 28;
