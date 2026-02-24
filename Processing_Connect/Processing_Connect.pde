@@ -14,7 +14,6 @@ String TOKEN    = "";
 String BOARD_ID = "";
 
 // Serial
-// Change COM_PORT to match your Pico W's Serial1 port (check Arduino IDE -> Tools -> Port)
 final String COM_PORT   = "COM4";
 final int    BAUD_RATE  = 9600;
 
@@ -22,11 +21,25 @@ final int    BAUD_RATE  = 9600;
 final float MAX_PRESSURE = 50.0;
 final int   CHECK_INTERVAL_MS = 10000; // Poll every 10 seconds
 
+// --- State Machine Definitions ---
+final int STATE_BOOTING = 0;
+final int STATE_LOADING = 1;
+final int STATE_ERROR   = 2;
+final int STATE_TRACKING= 3;
+
 // Runtime State
 Serial serialPort;
-int    lastCheck = -CHECK_INTERVAL_MS; // Force check on first frame
-int    latestPotValue = 0;             // Latest raw potentiometer reading from Pico (0-4095)
-int    cachedListCount = 0;            // Number of lists fetched from Trello
+long   lastApiRequestTime = -CHECK_INTERVAL_MS; 
+int    latestPotValue = 0;             
+int    cachedListCount = 0;          
+int    lastSelectedIndex = -1;        
+int    currentState = STATE_BOOTING;
+
+// Target colors for TRACKING state
+int    targetRed = 0;
+int    targetGreen = 0;
+int    targetBlue = 0;
+boolean isFetching = false;       
 
 // ----------------------------------------
 void setup() {
@@ -59,10 +72,69 @@ void setup() {
 
 // ----------------------------------------
 void draw() {
-  // Poll Trello on interval
-  if (millis() - lastCheck >= CHECK_INTERVAL_MS) {
-    lastCheck = millis();
-    fetchAndSend();
+  long ms = millis();
+
+  // 1. Edge Detection & Timer Check
+  boolean timeToUpdate = (ms - lastApiRequestTime >= CHECK_INTERVAL_MS);
+  
+  // Predict which list we're pointing at based on latestPotValue
+  int currentSelectedIndex = 0;
+  if (cachedListCount > 1) {
+    currentSelectedIndex = (int)map(latestPotValue, 0, 4095, 0, cachedListCount - 0.001);
+    currentSelectedIndex = constrain(currentSelectedIndex, 0, cachedListCount - 1);
+  }
+  
+  boolean listChanged = (currentSelectedIndex != lastSelectedIndex) && (cachedListCount > 0);
+
+  // 2. Trigger Background Thread
+  if ((listChanged || timeToUpdate) && !isFetching) {
+    lastSelectedIndex = currentSelectedIndex;
+    lastApiRequestTime = ms;
+
+    setState(STATE_LOADING);
+    
+    thread("fetchTrelloDataBackground"); 
+  }
+
+  // 3. Render Window UI based on current State
+  switch (currentState) {
+    case STATE_BOOTING:
+      background(30);
+      drawText("BOOTING... Waiting for API");
+      break;
+
+    case STATE_LOADING:
+      // White/Gray breathing, matching BOOTING style but active
+      float pulse = (sin(ms / 300.0) + 1.0) / 2.0; // 0.0 to 1.0
+      int val = (int)(30 + (70 * pulse)); 
+      background(val);
+      drawText("LOADING Data from Trello...");
+      break;
+
+    case STATE_ERROR:
+      // Red flash
+      if ((ms % 1000) < 500) background(150, 0, 0); else background(30, 0, 0);
+      drawText("ERROR: API Request Failed!");
+      break;
+
+    case STATE_TRACKING:
+      background(targetRed, targetGreen, targetBlue);
+      drawText("TRACKING | List [" + lastSelectedIndex + "]\nPot: " + latestPotValue + " / 4095\nR:" + targetRed + " G:" + targetGreen + " B:" + targetBlue);
+      break;
+  }
+}
+
+// UI Helper
+void drawText(String msg) {
+  fill(255);
+  text(msg, 10, 30);
+}
+
+// State Helper: Updates local state and notifies Pico W
+void setState(int s) {
+  currentState = s;
+  if (serialPort != null) {
+    serialPort.write("STATE:" + s + "\n");
   }
 }
 
@@ -81,123 +153,101 @@ void serialEvent(Serial port) {
 }
 
 // ----------------------------------------
-// Core: Fetch Trello -> Calculate pressure -> Send to Pico W
-void fetchAndSend() {
+// Fetch Trello -> Calculate pressure -> Send to Pico W (Runs on separate thread)
+void fetchTrelloDataBackground() {
+  isFetching = true; // Lock
   println("\n========================================");
 
   // 1. Get all lists on the board
-  String listsJson = httpGet("https://api.trello.com/1/boards/" + BOARD_ID
-    + "/lists?key=" + API_KEY + "&token=" + TOKEN);
-  if (listsJson == null) { println("ERROR: Failed to fetch lists."); return; }
+  String listsJson = httpGet("https://api.trello.com/1/boards/" + BOARD_ID + "/lists?key=" + API_KEY + "&token=" + TOKEN);
+  if (listsJson == null) { 
+    println("ERROR: Failed to fetch lists."); 
+    setState(STATE_ERROR);
+    isFetching = false; 
+    return; 
+  }
 
   JSONArray lists = parseJSONArray(listsJson);
-  if (lists == null || lists.size() == 0) { println("ERROR: No lists found."); return; }
-
-  println("Found " + lists.size() + " lists:");
-  cachedListCount = lists.size(); // Update global for pot mapping
-  for (int i = 0; i < lists.size(); i++) {
-    println("  [" + i + "] " + lists.getJSONObject(i).getString("name"));
+  if (lists == null || lists.size() == 0) { 
+    println("ERROR: No lists found."); 
+    setState(STATE_ERROR);
+    isFetching = false; 
+    return; 
   }
 
-  // 2. Map potentiometer reading to list index
-  //    Pot range: 0-4095 (12-bit ADC). Lists: 0 to cachedListCount-1.
-  int selectedIndex;
-  if (cachedListCount <= 1) {
-    selectedIndex = 0;
-  } else {
-    selectedIndex = (int)map(latestPotValue, 0, 4095, 0, cachedListCount - 0.001);
-    selectedIndex = constrain(selectedIndex, 0, cachedListCount - 1);
-  }
+  cachedListCount = lists.size();
+  
+  // Use the index saved right before the thread triggered
+  int selectedIndex = lastSelectedIndex; 
+  if (selectedIndex < 0 || selectedIndex >= cachedListCount) selectedIndex = 0;
+
   JSONObject selectedList = lists.getJSONObject(selectedIndex);
   String listId   = selectedList.getString("id");
   String listName = selectedList.getString("name");
-  println("---> Pot:" + latestPotValue + " -> List[" + selectedIndex + "]: '" + listName + "'");
+  println("---> Tracking list[" + selectedIndex + "]: '" + listName + "'");
 
-  // 3. Get cards in the selected list
-  String cardsJson = httpGet("https://api.trello.com/1/lists/" + listId
-    + "/cards?key=" + API_KEY + "&token=" + TOKEN);
-  if (cardsJson == null) { println("ERROR: Failed to fetch cards."); return; }
+  // 2. Get cards in the selected list
+  String cardsJson = httpGet("https://api.trello.com/1/lists/" + listId + "/cards?key=" + API_KEY + "&token=" + TOKEN);
+  if (cardsJson == null) { 
+    println("ERROR: Failed to fetch cards."); 
+    setState(STATE_ERROR);
+    isFetching = false; 
+    return; 
+  }
 
   JSONArray cards = parseJSONArray(cardsJson);
   println("There are " + cards.size() + " cards in this list.");
 
-  // 4. Pressure Analysis (mirrors trello_api_test.py)
+  // 3. Pressure Analysis
   int totalPressure = 0;
   long nowMs = System.currentTimeMillis();
 
   for (int i = 0; i < cards.size(); i++) {
     JSONObject card = cards.getJSONObject(i);
-    String cardName = card.getString("name");
-    println("   Card: " + cardName);
-
     if (!card.isNull("due")) {
-      String dueStr = card.getString("due"); // "2024-05-20T10:00:00.000Z"
+      String dueStr = card.getString("due"); 
       long dueMs = parseISO8601toMs(dueStr);
       double hoursLeft = (dueMs - nowMs) / 3600000.0;
 
-      if (hoursLeft < 0) {
-        println("    Status: Overdue (" + nf((float)-hoursLeft, 0, 1) + " h) -> +20");
-        totalPressure += 20;
-      } else if (hoursLeft <= 24) {
-        println("    Status: Due within 24h (" + nf((float)hoursLeft, 0, 1) + " h) -> +10");
-        totalPressure += 10;
-      } else if (hoursLeft <= 24 * 7) {
-        println("    Status: Due within 7 days (" + nf((float)(hoursLeft/24), 0, 1) + " d) -> +5");
-        totalPressure += 5;
-      } else {
-        println("    Status: Due in more than 7 days -> +2");
-        totalPressure += 2;
-      }
+      if (hoursLeft < 0) totalPressure += 20;
+      else if (hoursLeft <= 24) totalPressure += 10;
+      else if (hoursLeft <= 24 * 7) totalPressure += 5;
+      else totalPressure += 2;
     } else {
-      println("    Status: No due date -> +1");
       totalPressure += 1;
     }
   }
 
   println("Total pressure score: " + totalPressure);
 
-  // 5. Color mapping: Blue(idle) → Green(low) → Yellow(mid) → Red(high)
-  int redPwm, greenPwm, bluePwm;
+  // 4. Color mapping: Blue(idle) → Green(low) → Yellow(mid) → Red(high)
   if (totalPressure == 0) {
-    // No tasks / empty list → Blue
-    redPwm = 0; greenPwm = 0; bluePwm = 255;
+    targetRed = 0; targetGreen = 0; targetBlue = 255;
   } else {
     float ratio = constrain(totalPressure / MAX_PRESSURE, 0, 1);
     if (ratio <= 0.5) {
-      // Green → Yellow: R ramps up, G stays at 255
       float t = ratio / 0.5;
-      redPwm = (int)(255 * t);
-      greenPwm = 255;
+      targetRed = (int)(255 * t);
+      targetGreen = 255;
     } else {
-      // Yellow → Red: R stays 255, G ramps down
       float t = (ratio - 0.5) / 0.5;
-      redPwm = 255;
-      greenPwm = (int)(255 * (1.0 - t));
+      targetRed = 255;
+      targetGreen = (int)(255 * (1.0 - t));
     }
-    bluePwm = 0;
+    targetBlue = 0;
   }
 
-  println("PWM -> R:" + redPwm + " G:" + greenPwm + " B:" + bluePwm);
+  println("PWM -> R:" + targetRed + " G:" + targetGreen + " B:" + targetBlue);
 
-  // 6. Update Processing window 
-  background(redPwm, greenPwm, bluePwm);
-  fill(255);
-  text("Pot: " + latestPotValue + " / 4095", 10, 25);
-  text("List [" + selectedIndex + "]: " + listName, 10, 50);
-  text("Pressure: " + totalPressure, 10, 75);
-  text("R:" + redPwm + "  G:" + greenPwm + "  B:" + bluePwm, 10, 100);
-  textSize(11);
-  fill(255, 200);
-  text("Rotate potentiometer to switch list", 10, 130);
-  textSize(14);
-
-  // 7. Send to Pico W via Serial (format: "R,G,B\n")
+  // 5. Send to Pico W via Serial (format: "RGB:r,g,b\n")
+  // The RGB string implicitly tells Pico to enter TRACKING state, but we also set local tracking
+  setState(STATE_TRACKING);
   if (serialPort != null) {
-    serialPort.write(redPwm + "," + greenPwm + "," + bluePwm + "\n");
-    println("Sent to Pico W: " + redPwm + "," + greenPwm + "," + bluePwm);
-  } else {
-    println("[No hardware] Serial send skipped.");
+    serialPort.write("RGB:" + targetRed + "," + targetGreen + "," + targetBlue + "\n");
+    println("Sent RGB to Pico W.");
   }
+  
+  isFetching = false; // Unlock
 }
 
 // ----------------------------------------
@@ -210,13 +260,13 @@ void loadEnv(String relativePath) {
     String line;
     while ((line = reader.readLine()) != null) {
       line = line.trim();
-      // Skip comments and blank lines
+
       if (line.isEmpty() || line.startsWith("#")) continue;
       int eq = line.indexOf('=');
       if (eq < 1) continue;
       String key   = line.substring(0, eq).trim();
       String value = line.substring(eq + 1).trim();
-      // Strip surrounding quotes if present
+
       if (value.startsWith("\"") && value.endsWith("\"")) {
         value = value.substring(1, value.length() - 1);
       }
@@ -251,21 +301,19 @@ String httpGet(String url) {
 // Input format: "2024-05-20T10:00:00.000Z"
 long parseISO8601toMs(String s) {
   try {
-    // Strip fractional seconds and Z, reformat using Java's parse
     s = s.replace("Z", "+0000");
     // Processing uses Java underneath — use SimpleDateFormat
     java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
     sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
     return sdf.parse(s).getTime();
   } catch (Exception e) {
-    // Fallback: try without milliseconds
     try {
       java.text.SimpleDateFormat sdf2 = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ");
       sdf2.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
       return sdf2.parse(s.replace("Z", "+0000")).getTime();
     } catch (Exception e2) {
       println("Date parse error: " + s);
-      return System.currentTimeMillis(); // Treat as now -> no pressure
+      return System.currentTimeMillis(); 
     }
   }
 }

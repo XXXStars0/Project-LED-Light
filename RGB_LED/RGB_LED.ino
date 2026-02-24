@@ -19,6 +19,20 @@ const int PIN_IR = 28;
 // Serial1 baud must match Processing sketch
 const int SERIAL1_BAUD = 9600;
 
+// --- State Machine Definitions ---
+enum SystemState {
+  STATE_BOOTING = 0,
+  STATE_LOADING = 1,
+  STATE_ERROR = 2,
+  STATE_TRACKING = 3
+};
+
+// Volatile variables shared between Core 0 and Core 1
+volatile SystemState currentState = STATE_BOOTING;
+volatile int targetR = 0;
+volatile int targetG = 0;
+volatile int targetB = 0;
+
 // WiFi-mode-only includes and globals
 #ifdef USE_WIFI_MODE
 #include "keys.h"
@@ -34,6 +48,58 @@ String listNames[MAX_LISTS];
 int listCount = 0;
 #endif
 
+// ---------------------------------------------------------
+// Core 1 (LED Animation Engine) - Runs on the second thread
+// ---------------------------------------------------------
+void setup1() {
+  // Give Core 0 time to init pins
+  delay(100);
+}
+
+void loop1() {
+  unsigned long ms = millis();
+
+  switch (currentState) {
+  case STATE_BOOTING:
+  case STATE_LOADING:
+    // White breathing for both booting and loading new data
+    {
+      float fade = (sin(ms / 300.0) + 1.0) / 2.0; // 0.0 to 1.0
+      int val = (int)(255 * fade);
+      analogWrite(PIN_LED_R, val);
+      analogWrite(PIN_LED_G, val);
+      analogWrite(PIN_LED_B, val);
+    }
+    break;
+
+  case STATE_ERROR:
+    // Red rapid double-blink
+    {
+      int cycle = ms % 1000;
+      if ((cycle > 0 && cycle < 100) || (cycle > 200 && cycle < 300)) {
+        analogWrite(PIN_LED_R, 255);
+      } else {
+        analogWrite(PIN_LED_R, 0);
+      }
+      analogWrite(PIN_LED_G, 0);
+      analogWrite(PIN_LED_B, 0);
+    }
+    break;
+
+  case STATE_TRACKING:
+    // Solid tracking color
+    analogWrite(PIN_LED_R, targetR);
+    analogWrite(PIN_LED_G, targetG);
+    analogWrite(PIN_LED_B, targetB);
+    break;
+  }
+  delay(10); // Prevent hard looping
+}
+
+// ---------------------------------------------------------
+// Core 0 (Logic Engine) - Main Thread
+// ---------------------------------------------------------
+
 void setup() {
   Serial.begin(115200); // USB debug port
 
@@ -41,7 +107,12 @@ void setup() {
   pinMode(PIN_LED_G, OUTPUT);
   pinMode(PIN_LED_B, OUTPUT);
   pinMode(PIN_POT, INPUT);
+  pinMode(PIN_BUTTON, INPUT);
+  pinMode(PIN_LDR, INPUT);
+  pinMode(PIN_IR, INPUT);
   analogReadResolution(12);
+
+  currentState = STATE_BOOTING;
 
 #ifdef USE_WIFI_MODE
   // WiFi Mode: connect to network, sync time, pre-fetch lists
@@ -62,14 +133,21 @@ void setup() {
     now = time(nullptr);
   }
   Serial.println("\nTime synchronized!");
+
+  currentState = STATE_LOADING;
   fetchTrelloLists();
+
+  if (listCount == 0) {
+    currentState = STATE_ERROR;
+  } else {
+    currentState =
+        STATE_TRACKING; // Requires initial loop logic to calculate color
+  }
 
 #else
   // USB Mode: Serial (USB CDC) is shared with Processing.
-  // Re-init at the baud rate Processing uses.
   Serial.begin(SERIAL1_BAUD);
-  // Note: no debug print here — would collide with incoming data from
-  // Processing
+  // Do not change state here, Processing will send STATE commands
 #endif
 }
 
@@ -77,58 +155,84 @@ void loop() {
 #ifdef USE_WIFI_MODE
   // ===== WiFi Mode Loop =====
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected!");
-    delay(5000);
+    if (currentState != STATE_ERROR) {
+      Serial.println("WiFi disconnected!");
+      currentState = STATE_ERROR;
+    }
+    delay(1000);
     return;
   }
   if (listCount == 0) {
-    Serial.println("No lists found or API failed.");
-    delay(5000);
+    if (currentState != STATE_ERROR) {
+      Serial.println("No lists found or API failed.");
+      currentState = STATE_ERROR;
+    }
+    delay(1000);
     return;
   }
 
+  // Edge Detection State
+  static int lastSelectedIndex = -1;
+  static unsigned long lastApiRequestTime = 0;
+  const unsigned long apiRequestInterval = 10000; // 10s default
+
   int potValue = analogRead(PIN_POT);
-  int selectedIndex = map(potValue, 0, 4096, 0, listCount);
-  selectedIndex = constrain(selectedIndex, 0, listCount - 1);
+  int currentSelectedIndex = map(potValue, 0, 4096, 0, listCount);
+  currentSelectedIndex = constrain(currentSelectedIndex, 0, listCount - 1);
 
-  Serial.println("\n========================================");
-  Serial.print("---> Tracking list: '");
-  Serial.print(listNames[selectedIndex]);
-  Serial.println("'");
+  bool timeToUpdate = (millis() - lastApiRequestTime >= apiRequestInterval);
+  bool listChanged = (currentSelectedIndex != lastSelectedIndex);
 
-  int totalPressure = calculateListPressure(listIDs[selectedIndex]);
-  Serial.print("Total pressure: ");
-  Serial.println(totalPressure);
+  // Trigger API update if list index changed or timer expired
+  if (listChanged || timeToUpdate) {
+    currentState = STATE_LOADING; // Trigger rainbow animation
 
-  // Color mapping: Blue(idle) → Green(low) → Yellow(mid) → Red(high)
-  int r, g, b;
-  if (totalPressure == 0) {
-    // No tasks / empty list → Blue
-    r = 0;
-    g = 0;
-    b = 255;
-  } else {
-    float ratio = (float)totalPressure / MAX_PRESSURE_THRESHOLD;
-    if (ratio > 1.0)
-      ratio = 1.0;
-    if (ratio <= 0.5) {
-      // Green → Yellow: R ramps up, G stays at 255
-      float t = ratio / 0.5;
-      r = (int)(255 * t);
-      g = 255;
+    Serial.println("\n========================================");
+    Serial.print("---> Tracking list: '");
+    Serial.print(listNames[currentSelectedIndex]);
+    Serial.println("'");
+
+    int totalPressure = calculateListPressure(listIDs[currentSelectedIndex]);
+    Serial.print("Total pressure: ");
+    Serial.println(totalPressure);
+
+    // Color mapping: Blue(idle) → Green(low) → Yellow(mid) → Red(high)
+    int r, g, b;
+    if (totalPressure == 0) {
+      r = 0;
+      g = 0;
+      b = 255;
     } else {
-      // Yellow → Red: R stays at 255, G ramps down
-      float t = (ratio - 0.5) / 0.5;
-      r = 255;
-      g = (int)(255 * (1.0 - t));
+      float ratio = (float)totalPressure / MAX_PRESSURE_THRESHOLD;
+      if (ratio > 1.0)
+        ratio = 1.0;
+      if (ratio <= 0.5) {
+        float t = ratio / 0.5;
+        r = (int)(255 * t);
+        g = 255;
+      } else {
+        float t = (ratio - 0.5) / 0.5;
+        r = 255;
+        g = (int)(255 * (1.0 - t));
+      }
+      b = 0;
     }
-    b = 0;
-  }
-  analogWrite(PIN_LED_R, r);
-  analogWrite(PIN_LED_G, g);
-  analogWrite(PIN_LED_B, b);
 
-  delay(10000);
+    // Update target colors that Core 1 will use in TRACKING state
+    targetR = r;
+    targetG = g;
+    targetB = b;
+
+    // Update detection states
+    lastSelectedIndex = currentSelectedIndex;
+    lastApiRequestTime = millis();
+
+    // Let animation catch up, then track
+    delay(200);
+    currentState = STATE_TRACKING;
+  }
+
+  delay(50); // Small loop delay
 
 #else
   // ===== USB Mode Loop =====
@@ -142,21 +246,30 @@ void loop() {
     Serial.println(potValue);
   }
 
-  // 2. Receive R,G,B commands from Processing
+  // 2. Receive commands from Processing
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     line.trim();
-    // Only parse lines matching "R,G,B" format (ignore POT echo or empty lines)
-    int c1 = line.indexOf(',');
-    int c2 = line.lastIndexOf(',');
-    if (c1 > 0 && c2 > c1) {
-      int r = line.substring(0, c1).toInt();
-      int g = line.substring(c1 + 1, c2).toInt();
-      int b = line.substring(c2 + 1).toInt();
 
-      analogWrite(PIN_LED_R, r);
-      analogWrite(PIN_LED_G, g);
-      analogWrite(PIN_LED_B, b);
+    if (line.startsWith("STATE:")) {
+      int s = line.substring(6).toInt();
+      if (s >= 0 && s <= 3) {
+        currentState = (SystemState)s;
+      }
+    } else if (line.startsWith("RGB:")) {
+      int c1 = line.indexOf(':', 4); // Find where R starts
+      int c2 = line.indexOf(',');
+      int c3 = line.lastIndexOf(',');
+      if (c2 > 0 && c3 > c2) {
+        // Line format: RGB:123,45,0
+        int r = line.substring(4, c2).toInt();
+        int g = line.substring(c2 + 1, c3).toInt();
+        int b = line.substring(c3 + 1).toInt();
+        targetR = r;
+        targetG = g;
+        targetB = b;
+        currentState = STATE_TRACKING; // Force tracking if colors provided
+      }
     }
   }
 #endif

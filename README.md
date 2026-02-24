@@ -1,6 +1,7 @@
 # 🚨 Project LED Light
 
 ![Class](https://img.shields.io/badge/Class-INFO_5321-B31B1B)
+![Trello](https://img.shields.io/badge/Trello-%23026AA7.svg?style=flat&logo=trello&logoColor=white)
 ![Raspberry Pi](https://img.shields.io/badge/-Raspberry_Pi-C51A4A?logo=Raspberry-Pi&logoColor=white)
 ![Arduino IDE](https://img.shields.io/badge/-Arduino_IDE-00979D?logo=Arduino&logoColor=white)
 ![C++](https://img.shields.io/badge/-C++-00599C?logo=c%2B%2B&logoColor=white)
@@ -26,7 +27,7 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 
 ## 💡 Pin Mapping Reference
 
-![Circuit Diagram (Unverified)](docs/img_circuit_1.jpeg)
+![Circuit Diagram (Corrected with 220Ω Resistors)](docs/img_circuit_2.jpeg)
 
 | Component         | Pico W Pin                   | Note           |
 | ----------------- | ---------------------------- | -------------- |
@@ -40,7 +41,20 @@ A Technical mini-project using Raspberry Pi Pico W and RGB LEDs. This project co
 
 This project uses the **[Trello API](https://developer.atlassian.com/cloud/trello/guides/rest-api/api-introduction/)** to monitor project changes and provide visual feedback via the RGB LED.
 
+## 🕹️ Usage & States
 
+### Controls
+Once the device is running, interact with the **Potentiometer (Knob)**. Rotating the knob maps its analog value (0-4095) to dynamically scroll through and select different lists from your Trello board. When you switch to a different list, the system detects the change (Edge Detection) and instantly triggers a new data fetch.
+
+### Visual Status Indicators (LED)
+The Pico W operates using a dual-core architecture to ensure smooth, non-blocking LED animations (Core 1) even during Wi-Fi / API requests (Core 0):
+- ⚪ **BOOTING / LOADING:** Smooth white breathing effect. Occurs during startup, network connection, or when actively querying new data from the Trello server.
+- 🔴 **ERROR:** Rapid red double-blink. Indicates Wi-Fi disconnection or API failure.
+- **TRACKING:** Solid colors indicating the accumulated "Pressure Score" of the currently tracked list (calculated based on card due dates):
+  - 🔵 **Blue:** Idle / Empty list.
+  - 🟢 **Green:** Low pressure (distant due dates).
+  - 🟡 **Yellow:** Medium pressure.
+  - 🔴 **Red:** High pressure (urgent or overdue tasks).
 ## 💻 Development Environment
 
 - **Primary IDE**: Arduino IDE (for Pico W Sketch)
